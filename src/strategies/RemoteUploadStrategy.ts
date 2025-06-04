@@ -1,8 +1,8 @@
 import { IStorageService, StorageConfig, UploadResult, RemoteFile } from '../models/RemoteFileBrowserModel';
 
 export interface UploadStrategy {
-  uploadFile(file: File, config: StorageConfig): Promise<UploadResult>;
-  uploadFiles(files: File[], config: StorageConfig): Promise<UploadResult[]>;
+  uploadFile(file: File, config: StorageConfig, onProgress?: (progress: number) => void): Promise<UploadResult>;
+  uploadFiles(files: File[], config: StorageConfig, onProgress?: (fileIndex: number, progress: number) => void): Promise<UploadResult[]>;
   validateFile(file: File): { valid: boolean; error?: string };
 }
 
@@ -57,7 +57,7 @@ export class RemoteUploadStrategy implements UploadStrategy {
     return { valid: true };
   }
 
-  async uploadFile(file: File, config: StorageConfig): Promise<UploadResult> {
+  async uploadFile(file: File, config: StorageConfig, onProgress?: (progress: number) => void): Promise<UploadResult> {
     const validation = this.validateFile(file);
     if (!validation.valid) {
       return {
@@ -67,7 +67,7 @@ export class RemoteUploadStrategy implements UploadStrategy {
     }
 
     try {
-      return await this.storageService.uploadFile(file, config);
+      return await this.storageService.uploadFile(file, config, onProgress);
     } catch (error) {
       return {
         success: false,
@@ -76,18 +76,25 @@ export class RemoteUploadStrategy implements UploadStrategy {
     }
   }
 
-  async uploadFiles(files: File[], config: StorageConfig): Promise<UploadResult[]> {
+  async uploadFiles(files: File[], config: StorageConfig, onProgress?: (fileIndex: number, progress: number) => void): Promise<UploadResult[]> {
     const results: UploadResult[] = [];
     
     // Upload files in parallel with concurrency limit
     const concurrencyLimit = 3;
     const chunks = this.chunkArray(files, concurrencyLimit);
     
+    let fileIndex = 0;
     for (const chunk of chunks) {
       const chunkResults = await Promise.all(
-        chunk.map(file => this.uploadFile(file, config))
+        chunk.map((file, chunkIndex) => {
+          const currentFileIndex = fileIndex + chunkIndex;
+          return this.uploadFile(file, config, (progress) => {
+            onProgress?.(currentFileIndex, progress);
+          });
+        })
       );
       results.push(...chunkResults);
+      fileIndex += chunk.length;
     }
 
     return results;
@@ -137,15 +144,22 @@ export class BatchUploadStrategy extends RemoteUploadStrategy {
     this.batchSize = batchSize;
   }
 
-  async uploadFiles(files: File[], config: StorageConfig): Promise<UploadResult[]> {
+  async uploadFiles(files: File[], config: StorageConfig, onProgress?: (fileIndex: number, progress: number) => void): Promise<UploadResult[]> {
     const results: UploadResult[] = [];
     const batches = this.chunkArray(files, this.batchSize);
     
+    let fileIndex = 0;
     for (const batch of batches) {
       const batchResults = await Promise.all(
-        batch.map(file => this.uploadFile(file, config))
+        batch.map((file, batchIndex) => {
+          const currentFileIndex = fileIndex + batchIndex;
+          return this.uploadFile(file, config, (progress) => {
+            onProgress?.(currentFileIndex, progress);
+          });
+        })
       );
       results.push(...batchResults);
+      fileIndex += batch.length;
       
       // Small delay between batches to avoid overwhelming the server
       if (batch !== batches[batches.length - 1]) {

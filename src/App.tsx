@@ -9,7 +9,8 @@ function App() {
   const storageConfig: StorageConfig = {
     containerName: 'uploads',
     accountName: 'yourstorageaccount',
-    sasToken: 'your-sas-token-here'
+    sasToken: 'your-sas-token-here',
+    credential: 'sas'
   };
 
   // Example API configuration for upload tickets

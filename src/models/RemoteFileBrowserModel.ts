@@ -26,13 +26,25 @@ export interface UploadResult {
 export interface StorageConfig {
   containerName: string;
   accountName: string;
-  sasToken: string;
+  sasToken?: string;
+  connectionString?: string;
+  credential?: 'anonymous' | 'sas' | 'connectionString' | 'defaultAzureCredential';
 }
 
 export interface IStorageService {
-  uploadFile(file: File, config: StorageConfig): Promise<UploadResult>;
-  deleteFile(url: string, config: StorageConfig): Promise<boolean>;
+  uploadFile(file: File, config: StorageConfig, onProgress?: (progress: number) => void): Promise<UploadResult>;
+  deleteFile(fileName: string, config: StorageConfig): Promise<boolean>;
   getFileUrl(fileName: string, config: StorageConfig): string;
+  listFiles(config: StorageConfig, prefix?: string): Promise<BlobItem[]>;
+  downloadFile(fileName: string, config: StorageConfig): Promise<Blob | null>;
+}
+
+export interface BlobItem {
+  name: string;
+  size: number;
+  lastModified: Date;
+  contentType: string;
+  url: string;
 }
 
 export interface RemoteFileUploadTicket {
