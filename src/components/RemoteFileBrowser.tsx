@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { RemoteFileBrowserField } from '../fields/RemoteFileBrowserField';
 import { RemoteUploadStrategy } from '../strategies/RemoteUploadStrategy';
 import { AzureStorageService } from '../services/AzureStorageService';
+import { RemoteTagsService } from '../services/RemoteTagsService';
 import { 
   RemoteFileBrowserState, 
   StorageConfig, 
@@ -10,6 +11,7 @@ import {
   SortField,
   SortDirection 
 } from '../models/RemoteFileBrowserModel';
+import { UploadTag } from '../models/RemoteTagsModel';
 import './RemoteFileBrowser.scss';
 
 interface RemoteFileBrowserProps {
@@ -18,6 +20,10 @@ interface RemoteFileBrowserProps {
   onFilesChange?: (files: any[]) => void;
   disabled?: boolean;
   showUploadProgress?: boolean;
+  tagsService?: RemoteTagsService;
+  autoLoadFromTags?: boolean;
+  onPostSuccess?: (result: any) => void;
+  onPostError?: (error: string) => void;
 }
 
 const RemoteFileBrowser: React.FC<RemoteFileBrowserProps> = ({
@@ -26,6 +32,10 @@ const RemoteFileBrowser: React.FC<RemoteFileBrowserProps> = ({
   onFilesChange,
   disabled = false,
   showUploadProgress = true,
+  tagsService,
+  autoLoadFromTags = false,
+  onPostSuccess,
+  onPostError,
 }) => {
   const [state, setState] = useState<RemoteFileBrowserState>({
     files: [],
@@ -38,6 +48,9 @@ const RemoteFileBrowser: React.FC<RemoteFileBrowserProps> = ({
     direction: 'asc',
   });
   const [searchTerm, setSearchTerm] = useState('');
+  const [isLoadingFromTags, setIsLoadingFromTags] = useState(false);
+  const [currentUploadTag, setCurrentUploadTag] = useState<UploadTag | undefined>();
+  const [isPosting, setIsPosting] = useState(false);
   
   const fileInputRef = useRef<HTMLInputElement>(null);
   const fileBrowserField = useRef<RemoteFileBrowserField | null>(null);
@@ -54,13 +67,22 @@ const RemoteFileBrowser: React.FC<RemoteFileBrowserProps> = ({
       storageConfig,
       {
         fileFilter,
+        tagsService,
         onStateChange: (newState) => {
           setState(newState);
           onFilesChange?.(newState.files);
+          // Update current upload tag when state changes
+          const uploadTag = fileBrowserField.current?.getCurrentUploadTag();
+          setCurrentUploadTag(uploadTag);
         },
       }
     );
-  }, [storageConfig, fileFilter, onFilesChange]);
+
+    // Auto-load from tags if enabled
+    if (autoLoadFromTags && tagsService) {
+      handleLoadFromTags();
+    }
+  }, [storageConfig, fileFilter, onFilesChange, tagsService, autoLoadFromTags]);
 
   const handleFileInput = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && fileBrowserField.current) {
@@ -142,6 +164,45 @@ const RemoteFileBrowser: React.FC<RemoteFileBrowserProps> = ({
     return sortOptions.direction === 'asc' ? '↑' : '↓';
   };
 
+  const handleLoadFromTags = async () => {
+    if (!fileBrowserField.current || !tagsService) return;
+    
+    setIsLoadingFromTags(true);
+    try {
+      const success = await fileBrowserField.current.initializeFromRemoteTags();
+      if (!success) {
+        onPostError?.('Failed to load files from remote tags');
+      }
+    } catch (error) {
+      console.error('Error loading from tags:', error);
+      onPostError?.('Error loading files from remote tags');
+    } finally {
+      setIsLoadingFromTags(false);
+    }
+  };
+
+  const handlePostFiles = async (includeContent = false) => {
+    if (!fileBrowserField.current) return;
+    
+    setIsPosting(true);
+    try {
+      const success = includeContent 
+        ? await fileBrowserField.current.postFilesToServerWithContent()
+        : await fileBrowserField.current.postFilesToServer();
+      
+      if (success) {
+        onPostSuccess?.(success);
+      } else {
+        onPostError?.('Failed to post files to server');
+      }
+    } catch (error) {
+      console.error('Error posting files:', error);
+      onPostError?.('Error posting files to server');
+    } finally {
+      setIsPosting(false);
+    }
+  };
+
   return (
     <div className="file-browser">
       <div className="file-browser-header">
@@ -154,6 +215,15 @@ const RemoteFileBrowser: React.FC<RemoteFileBrowserProps> = ({
             onChange={(e) => setSearchTerm(e.target.value)}
             className="search-input"
           />
+          {tagsService && (
+            <button 
+              className="load-btn"
+              onClick={handleLoadFromTags}
+              disabled={disabled || isLoadingFromTags}
+            >
+              {isLoadingFromTags ? 'Loading...' : 'Load from Tags'}
+            </button>
+          )}
           <button 
             className="upload-btn"
             onClick={() => fileInputRef.current?.click()}
@@ -163,6 +233,15 @@ const RemoteFileBrowser: React.FC<RemoteFileBrowserProps> = ({
           </button>
         </div>
       </div>
+
+      {currentUploadTag && (
+        <div className="upload-tag-info">
+          <div className="tag-details">
+            <span className="tag-name">📂 {currentUploadTag.name}</span>
+            <span className="tag-folder">Folder: {currentUploadTag.customTags.folder}</span>
+          </div>
+        </div>
+      )}
 
       {showUploadProgress && stats.totalFiles > 0 && (
         <div className="upload-stats">
@@ -300,6 +379,30 @@ const RemoteFileBrowser: React.FC<RemoteFileBrowserProps> = ({
           >
             Clear Selection
           </button>
+        </div>
+      )}
+
+      {fileBrowserField.current?.hasRemoteFiles() && (
+        <div className="post-actions">
+          <div className="post-info">
+            <span>Remote files ready: {fileBrowserField.current?.getRemoteFilesCount()}</span>
+          </div>
+          <div className="post-buttons">
+            <button 
+              className="post-btn post-urls"
+              onClick={() => handlePostFiles(false)}
+              disabled={isPosting || state.isUploading}
+            >
+              {isPosting ? 'Posting...' : 'Post File URLs'}
+            </button>
+            <button 
+              className="post-btn post-content"
+              onClick={() => handlePostFiles(true)}
+              disabled={isPosting || state.isUploading}
+            >
+              {isPosting ? 'Posting...' : 'Post with Content'}
+            </button>
+          </div>
         </div>
       )}
     </div>
