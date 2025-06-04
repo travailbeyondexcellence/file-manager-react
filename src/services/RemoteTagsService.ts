@@ -14,19 +14,30 @@ export class RemoteTagsService {
 
   async fetchRemoteTags(): Promise<RemoteTagsResponse> {
     try {
+      console.log('Fetching remote tags from:', this.tagsEndpoint);
+      
       const response = await fetch(this.tagsEndpoint, {
         method: 'GET',
         headers: {
           'Content-Type': 'application/json',
-          ...(this.authToken && { 'Authorization': `Bearer ${this.authToken}` }),
+          'Accept': 'application/json',
+          ...(this.authToken && this.authToken !== 'your-api-token-here' && { 'Authorization': `Bearer ${this.authToken}` }),
         },
+        mode: 'cors', // Enable CORS
       });
 
+      console.log('Response status:', response.status);
+      console.log('Response headers:', Object.fromEntries(response.headers.entries()));
+
       if (!response.ok) {
-        throw new Error(`Failed to fetch tags: ${response.status} ${response.statusText}`);
+        const errorText = await response.text();
+        console.error('Response error:', errorText);
+        throw new Error(`Failed to fetch tags: ${response.status} ${response.statusText} - ${errorText}`);
       }
 
       const data = await response.json();
+      console.log('Response data:', data);
+      
       const tags: RemoteTag[] = Array.isArray(data) ? data : data.tags || [];
       
       // Parse dates
@@ -47,6 +58,16 @@ export class RemoteTagsService {
       };
     } catch (error) {
       console.error('Error fetching remote tags:', error);
+      
+      // Provide more detailed error information
+      if (error instanceof Error) {
+        if (error.message.includes('CORS')) {
+          console.error('CORS error - the server may not allow cross-origin requests');
+        } else if (error.message.includes('Failed to fetch')) {
+          console.error('Network error - check if the endpoint is accessible');
+        }
+      }
+      
       return {
         tags: [],
         total: 0,
