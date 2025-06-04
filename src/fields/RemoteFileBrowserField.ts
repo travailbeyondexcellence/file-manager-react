@@ -5,9 +5,12 @@ import {
   FileFilter, 
   FileSortOptions,
   SortField,
-  SortDirection 
+  SortDirection,
+  BlobItem 
 } from '../models/RemoteFileBrowserModel';
 import { RemoteUploadStrategy } from '../strategies/RemoteUploadStrategy';
+import { RemoteTagsService } from '../services/RemoteTagsService';
+import { UploadTag, PostFilesRequest } from '../models/RemoteTagsModel';
 
 export class RemoteFileBrowserField {
   private state: RemoteFileBrowserState;
@@ -15,6 +18,8 @@ export class RemoteFileBrowserField {
   private storageConfig: StorageConfig;
   private fileFilter: FileFilter;
   private onStateChange?: (state: RemoteFileBrowserState) => void;
+  private tagsService?: RemoteTagsService;
+  private currentUploadTag?: UploadTag;
 
   constructor(
     uploadStrategy: RemoteUploadStrategy,
@@ -22,12 +27,14 @@ export class RemoteFileBrowserField {
     options?: {
       fileFilter?: FileFilter;
       onStateChange?: (state: RemoteFileBrowserState) => void;
+      tagsService?: RemoteTagsService;
     }
   ) {
     this.uploadStrategy = uploadStrategy;
     this.storageConfig = storageConfig;
     this.fileFilter = options?.fileFilter || {};
     this.onStateChange = options?.onStateChange;
+    this.tagsService = options?.tagsService;
     
     this.state = {
       files: [],
@@ -254,5 +261,204 @@ export class RemoteFileBrowserField {
     if (type.includes('text')) return '📝';
     if (type.includes('zip') || type.includes('rar')) return '📦';
     return '📁';
+  }
+
+  // Remote tags workflow methods
+  async initializeFromRemoteTags(): Promise<boolean> {
+    if (!this.tagsService) {
+      console.warn('No tags service configured');
+      return false;
+    }
+
+    try {
+      this.updateState({ isUploading: true });
+      
+      // Fetch upload tag
+      const uploadTag = await this.tagsService.getUploadTag();
+      if (!uploadTag) {
+        console.warn('No upload tag found');
+        return false;
+      }
+
+      this.currentUploadTag = uploadTag;
+      
+      // Extract folder path
+      const folderPath = this.tagsService.extractFolderPath(uploadTag);
+      if (!folderPath) {
+        console.warn('No folder path found in upload tag');
+        return false;
+      }
+
+      // Update file filter from upload tag
+      const tagFileFilter = this.tagsService.getFileFilterFromUploadTag(uploadTag);
+      this.fileFilter = { ...this.fileFilter, ...tagFileFilter };
+
+      // Load files from remote folder
+      await this.loadFilesFromRemoteFolder(folderPath);
+      
+      return true;
+    } catch (error) {
+      console.error('Failed to initialize from remote tags:', error);
+      return false;
+    } finally {
+      this.updateState({ isUploading: false });
+    }
+  }
+
+  async loadFilesFromRemoteFolder(folderPath: string): Promise<void> {
+    try {
+      // Use storage service to list files in the folder
+      const blobItems = await this.uploadStrategy['storageService'].listFiles(
+        this.storageConfig, 
+        folderPath
+      );
+
+      // Convert blob items to remote files
+      const remoteFiles: RemoteFile[] = blobItems.map(item => ({
+        id: this.generateFileId(),
+        name: item.name.replace(folderPath + '/', ''), // Remove folder prefix
+        size: item.size,
+        type: item.contentType,
+        lastModified: item.lastModified,
+        status: 'completed',
+        url: item.url,
+      }));
+
+      this.updateState({ files: remoteFiles });
+    } catch (error) {
+      console.error('Failed to load files from remote folder:', error);
+      throw error;
+    }
+  }
+
+  async postFilesToServer(): Promise<boolean> {
+    if (!this.tagsService || !this.currentUploadTag) {
+      console.error('No tags service or upload tag available for posting');
+      return false;
+    }
+
+    try {
+      this.updateState({ isUploading: true });
+
+      // Get files to post (only completed files)
+      const filesToPost = this.state.files.filter(file => file.status === 'completed');
+      
+      if (filesToPost.length === 0) {
+        console.warn('No completed files to post');
+        return false;
+      }
+
+      // Option 1: Post file URLs only (recommended for large files)
+      const postFiles = filesToPost.map(file => ({
+        name: file.name,
+        size: file.size,
+        type: file.type,
+        content: file.url || '', // Use URL as content
+        url: file.url,
+      }));
+
+      const request: PostFilesRequest = {
+        files: postFiles,
+        metadata: {
+          uploadTagId: this.currentUploadTag.id,
+          folderPath: this.tagsService.extractFolderPath(this.currentUploadTag),
+          totalFiles: filesToPost.length,
+          timestamp: new Date().toISOString(),
+        },
+        tagId: this.currentUploadTag.id,
+      };
+
+      const result = await this.tagsService.postFilesToServer(request);
+      
+      if (result.success) {
+        console.log(`Successfully posted ${result.processedFiles} files`);
+        return true;
+      } else {
+        console.error('Failed to post files:', result.message, result.errors);
+        return false;
+      }
+    } catch (error) {
+      console.error('Error posting files to server:', error);
+      return false;
+    } finally {
+      this.updateState({ isUploading: false });
+    }
+  }
+
+  async postFilesToServerWithContent(): Promise<boolean> {
+    if (!this.tagsService || !this.currentUploadTag) {
+      console.error('No tags service or upload tag available for posting');
+      return false;
+    }
+
+    try {
+      this.updateState({ isUploading: true });
+
+      // Get files to post (only completed files)
+      const filesToPost = this.state.files.filter(file => file.status === 'completed');
+      
+      if (filesToPost.length === 0) {
+        console.warn('No completed files to post');
+        return false;
+      }
+
+      // Download file contents and create post files
+      const postFiles = await this.tagsService.downloadAndConvertBlobItems(
+        filesToPost.map(file => ({
+          name: file.name,
+          size: file.size,
+          lastModified: file.lastModified,
+          contentType: file.type,
+          url: file.url || '',
+        })),
+        (url) => this.uploadStrategy['storageService'].downloadFile(
+          this.extractFileNameFromUrl(url), 
+          this.storageConfig
+        )
+      );
+
+      const request: PostFilesRequest = {
+        files: postFiles,
+        metadata: {
+          uploadTagId: this.currentUploadTag.id,
+          folderPath: this.tagsService.extractFolderPath(this.currentUploadTag),
+          totalFiles: filesToPost.length,
+          timestamp: new Date().toISOString(),
+        },
+        tagId: this.currentUploadTag.id,
+      };
+
+      const result = await this.tagsService.postFilesToServerAsJSON(request);
+      
+      if (result.success) {
+        console.log(`Successfully posted ${result.processedFiles} files with content`);
+        return true;
+      } else {
+        console.error('Failed to post files:', result.message, result.errors);
+        return false;
+      }
+    } catch (error) {
+      console.error('Error posting files to server:', error);
+      return false;
+    } finally {
+      this.updateState({ isUploading: false });
+    }
+  }
+
+  private extractFileNameFromUrl(url: string): string {
+    const urlParts = url.split('/');
+    return decodeURIComponent(urlParts[urlParts.length - 1].split('?')[0]);
+  }
+
+  getCurrentUploadTag(): UploadTag | undefined {
+    return this.currentUploadTag;
+  }
+
+  hasRemoteFiles(): boolean {
+    return this.state.files.some(file => file.status === 'completed' && file.url);
+  }
+
+  getRemoteFilesCount(): number {
+    return this.state.files.filter(file => file.status === 'completed' && file.url).length;
   }
 }
